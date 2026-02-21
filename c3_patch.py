@@ -1095,7 +1095,7 @@ def main() -> None:
     print("\n" + "=" * 62)
     print("  All patches applied.")
     print("  Reboot the device to activate changes:")
-    print(f"    ssh -i openpilot_ssh/op_ssh {user}@{host} 'sudo reboot'")
+    print(f"    ssh -i {SSH_KEY} {user}@{host} 'sudo reboot'")
     print("=" * 62)
 
 
