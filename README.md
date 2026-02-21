@@ -48,7 +48,7 @@ If that works you're ready. If not, make sure your public key is added to the C3
 The C3 must be reachable from the machine running OP Necromancer. Common addresses:
 - **USB tethering / phone hotspot:** `192.168.43.1`
 - **Home network:** check your router for the C3's IP, or use `comma.local`
-- **USB cable (direct):** `192.168.0.30`
+- **USB cable (direct):** `192.168.0.x`
 
 OP Necromancer will attempt to auto-discover the C3 on all of these. You can also enter the IP manually.
 
