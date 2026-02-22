@@ -854,8 +854,8 @@ class OPNecromancer(tk.Tk):
         tk.Label(hdr, text=f"Target: {host}",
                  bg=HDR, fg=MUTED, font=("TkDefaultFont", 9)).pack()
 
-        # Buttons
-        btn_row = tk.Frame(win, bg=BG, pady=10)
+        # Buttons — row 1
+        btn_row = tk.Frame(win, bg=BG, pady=8)
         btn_row.pack(fill="x", padx=20)
         verify_btn   = self._mk_btn(btn_row, "🔍  Verify Patch Service",
                                     lambda: _do_verify(), bg="#3a2a4e", fg=ACC)
@@ -868,9 +868,12 @@ class OPNecromancer(tk.Tk):
         specific_btn.pack(side="left", padx=(0, 8))
         branch_btn   = self._mk_btn(btn_row, "🌿  Switch Branch…",
                                     lambda: _do_switch_branch(), bg="#3a2a4e", fg=ACC)
-        branch_btn.pack(side="left", padx=(0, 8))
-        rollback_btn = self._mk_btn(btn_row, "↩  Rollback…",
-                                    lambda: _do_rollback(), bg="#3a2a4e", fg=WARN)
+        branch_btn.pack(side="left")
+        # Buttons — row 2
+        btn_row2 = tk.Frame(win, bg=BG)
+        btn_row2.pack(fill="x", padx=20)
+        rollback_btn = self._mk_btn(btn_row2, "↩  Rollback to Backup…",
+                                    lambda: _do_rollback(), bg="#4e2a1a", fg=WARN)
         rollback_btn.pack(side="left")
 
         tk.Frame(win, bg=SEP, height=1).pack(fill="x", padx=20)
