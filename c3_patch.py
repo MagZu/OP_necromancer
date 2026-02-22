@@ -1043,6 +1043,7 @@ def main() -> None:
     parser.add_argument("--check",      action="store_true",  help="Show status only, do not modify")
     parser.add_argument("--no-rebuild", action="store_true",  help="Skip camerad rebuild")
     parser.add_argument("--no-persist", action="store_true",  help="Skip persistence service")
+    parser.add_argument("--c3-panel",   action="store_true",  help="Install Necromancer in-car maintenance panel")
     args = parser.parse_args()
 
     host, user = args.host, args.user
@@ -1092,11 +1093,119 @@ def main() -> None:
     else:
         print("\n[+]  Skipping rebuild (--no-rebuild)")
 
+    if args.c3_panel:
+        step_install_c3_panel(host, user, op)
+    else:
+        print("\n[+]  Skipping Necromancer C3 panel (--c3-panel not set)")
+
     print("\n" + "=" * 62)
     print("  All patches applied.")
     print("  Reboot the device to activate changes:")
     print(f"    ssh -i {SSH_KEY} {user}@{host} 'sudo reboot'")
     print("=" * 62)
+
+
+def step_install_c3_panel(host: str, user: str, op: str) -> None:
+    """Install the Necromancer in-car maintenance panel into the openpilot settings UI."""
+    print("\n[+]  Installing Necromancer C3 panel ...")
+
+    c3_panel_dir = PATCH_DIR / "c3_panel"
+    if not c3_panel_dir.exists():
+        print(f"  ERROR: c3_panel directory not found at {c3_panel_dir}")
+        return
+
+    # Create scripts/necromancer/ directory on device
+    ssh_run(host, user, f"mkdir -p {op}/scripts/necromancer")
+
+    # Copy the settings panel
+    scp_push(host, user, c3_panel_dir / "necromancer.py",
+             f"{op}/selfdrive/ui/layouts/settings/necromancer.py")
+    print("  necromancer.py  →  selfdrive/ui/layouts/settings/")
+
+    # Copy the full-screen runner
+    scp_push(host, user, c3_panel_dir / "necro_runner.py",
+             f"{op}/scripts/necromancer/necro_runner.py")
+    print("  necro_runner.py →  scripts/necromancer/")
+
+    # Empty __init__.py so Python treats it as a package
+    ssh_run(host, user, f"touch {op}/scripts/necromancer/__init__.py")
+
+    # Patch settings.py to register the new panel (idempotent)
+    settings_py = f"{op}/selfdrive/ui/layouts/settings/settings.py"
+    patch_script = f"""
+import pathlib
+p = pathlib.Path({repr(settings_py)})
+t = p.read_text()
+
+IMPORT_LINE = "from openpilot.selfdrive.ui.layouts.settings.necromancer import NecromancerLayout"
+ENUM_LINE   = "  NECROMANCER = 7"
+PANEL_LINE  = "PanelType.NECROMANCER"
+
+changed = False
+
+if IMPORT_LINE not in t:
+    t = t.replace(
+        "from openpilot.selfdrive.ui.layouts.settings.nap import NAPLayout",
+        "from openpilot.selfdrive.ui.layouts.settings.nap import NAPLayout\\n" + IMPORT_LINE,
+    )
+    changed = True
+
+if ENUM_LINE not in t:
+    t = t.replace("  DEVELOPER = 6", "  DEVELOPER = 6\\n  NECROMANCER = 7")
+    changed = True
+
+if PANEL_LINE not in t:
+    t = t.replace(
+        'PanelType.DEVELOPER: PanelInfo(tr_noop("Developer"), DeveloperLayout()),',
+        'PanelType.DEVELOPER: PanelInfo(tr_noop("Developer"), DeveloperLayout()),\\n'
+        '      PanelType.NECROMANCER: PanelInfo(tr_noop("Necro"), NecromancerLayout()),',
+    )
+    changed = True
+
+# Purple sidebar button for Necromancer
+SIDEBAR_OLD = '''      # Button styling
+      is_selected = panel_type == self._current_panel
+      text_color = TEXT_SELECTED if is_selected else TEXT_NORMAL'''
+SIDEBAR_NEW = '''      # Button styling
+      is_selected = panel_type == self._current_panel
+      if panel_type == PanelType.NECROMANCER:
+        text_color = rl.Color(192, 132, 252, 255) if is_selected else rl.Color(130, 80, 200, 255)
+      else:
+        text_color = TEXT_SELECTED if is_selected else TEXT_NORMAL'''
+if SIDEBAR_OLD in t and SIDEBAR_NEW not in t:
+    t = t.replace(SIDEBAR_OLD, SIDEBAR_NEW)
+    changed = True
+
+# Make sidebar nav button height dynamic so all panels fit on screen
+NAV_OLD = '''    # Navigation buttons
+    y = rect.y + 300
+    for panel_type, panel_info in self._panels.items():
+      button_rect = rl.Rectangle(rect.x + 50, y, rect.width - 150, NAV_BTN_HEIGHT)'''
+NAV_NEW = '''    # Navigation buttons — height shrinks to fit all panels on screen
+    _nav_h = min(NAV_BTN_HEIGHT, int((rect.height - 320) / max(len(self._panels), 1)))
+    y = rect.y + 300
+    for panel_type, panel_info in self._panels.items():
+      button_rect = rl.Rectangle(rect.x + 50, y, rect.width - 150, _nav_h)'''
+if NAV_OLD in t:
+    t = t.replace(NAV_OLD, NAV_NEW)
+    t = t.replace('      y += NAV_BTN_HEIGHT', '      y += _nav_h')
+    changed = True
+
+if changed:
+    p.write_text(t)
+    print("PATCHED")
+else:
+    print("ALREADY_PATCHED")
+"""
+    result = device_python(host, user, patch_script)
+    if "PATCHED" in result:
+        print("  settings.py patched — Necromancer tab added to settings UI.")
+    elif "ALREADY_PATCHED" in result:
+        print("  settings.py already has Necromancer tab.")
+    else:
+        print(f"  WARNING: settings.py patch result unclear: {result!r}")
+
+    print("  ✓  Necromancer C3 panel installed.")
 
 
 if __name__ == "__main__":

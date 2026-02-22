@@ -245,6 +245,7 @@ def run_install(
     done_cb,             # callable(bool, str) — UI must schedule via after()
     dry_run: bool = False,
     backup: bool = True,
+    c3_panel: bool = True,
 ) -> None:
     """Launch the full installation (or dry-run scry) in a daemon thread."""
 
@@ -346,6 +347,8 @@ def run_install(
         else:
             patch_args = ["--host", host, "--user", user, "--key", key,
                           "--op-dir", "/data/openpilot"]
+            if c3_panel:
+                patch_args.append("--c3-panel")
 
         patch_proc = subprocess.Popen(
             [sys.executable, str(C3_PATCH)] + patch_args,
@@ -406,6 +409,7 @@ class OPNecromancer(tk.Tk):
         self._c3_patched:     bool = False
         self._dry_run         = tk.BooleanVar(value=False)
         self._backup_existing = tk.BooleanVar(value=True)
+        self._include_panel   = tk.BooleanVar(value=True)
         self._log_q:          queue.Queue[str] = queue.Queue()
 
         # Reset repo validation if URL or branch changes
@@ -1015,17 +1019,29 @@ class OPNecromancer(tk.Tk):
         def _do_update():
             _set_btns("disabled")
             _append("☠  Channeling the latest incantations — updating openpilot...\n\n")
-            threading.Thread(
-                target=_run_checkout_and_patch,
-                args=(
+            def _update_and_panel():
+                _run_checkout_and_patch(
                     "Pulling latest commits from origin",
                     "cd /data/openpilot && "
                     "git submodule foreach --recursive git reset --hard 2>/dev/null; "
                     "git submodule foreach --recursive git clean -fd 2>/dev/null; "
                     "git pull --rebase --recurse-submodules --progress 2>&1",
-                ),
-                daemon=True,
-            ).start()
+                )
+                # Refresh C3 panel files if they were installed
+                if self._include_panel.get():
+                    _append("\n[+]  Refreshing Necromancer C3 panel...\n")
+                    patch_proc = subprocess.Popen(
+                        [sys.executable, str(C3_PATCH),
+                         "--host", host, "--key", key, "--c3-panel",
+                         "--no-rebuild", "--no-persist"],
+                        stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                        text=True, bufsize=1, cwd=str(C3_PATCH.parent),
+                    )
+                    assert patch_proc.stdout is not None
+                    for line in patch_proc.stdout:
+                        _append(line.rstrip() + "\n")
+                    patch_proc.wait()
+            threading.Thread(target=_update_and_panel, daemon=True).start()
 
         # ── Specific commit ───────────────────────────────────────────────────
         def _do_specific_commit():
@@ -1364,6 +1380,17 @@ class OPNecromancer(tk.Tk):
         ).pack(anchor="w")
         # not packed until c3_patched confirmed — _show_step handles this
 
+        # C3 panel option — always visible
+        tk.Frame(f, bg=SEP, height=1).pack(fill="x", pady=(10, 6))
+        tk.Checkbutton(
+            f,
+            text="☠  Install Necromancer C3 panel — adds an in-car maintenance menu to the openpilot settings screen",
+            variable=self._include_panel,
+            bg=BG, fg=MUTED, selectcolor=CARD,
+            activebackground=BG, activeforeground=ACC,
+            font=("TkDefaultFont", 9),
+        ).pack(anchor="w")
+
         self._validate_btn = self._mk_btn(f, "Inspect Grimoire ☠", self._do_validate,
                      bg="#3a2a4e", fg=ACC)
         self._validate_btn.pack(anchor="w", pady=10)
@@ -1493,7 +1520,8 @@ class OPNecromancer(tk.Tk):
             self.after(0, lambda: self._on_install_done(ok, msg))
 
         run_install(host, DEFAULT_USER, key, url, branch, log_cb, done_cb,
-                    dry_run=dry, backup=self._backup_existing.get())
+                    dry_run=dry, backup=self._backup_existing.get(),
+                    c3_panel=self._include_panel.get())
 
     def _on_install_done(self, ok: bool, msg: str):
         dry = self._dry_run.get()
