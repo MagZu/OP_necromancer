@@ -223,6 +223,7 @@ def run_install(
     log_cb,              # callable(str) — called from worker thread
     done_cb,             # callable(bool, str) — UI must schedule via after()
     dry_run: bool = False,
+    backup: bool = True,
 ) -> None:
     """Launch the full installation (or dry-run scry) in a daemon thread."""
 
@@ -256,23 +257,27 @@ def run_install(
             )
             log("  Done — the C3 is quiet.")
 
-        # ── 2. Entomb the old install ─────────────────────────────────────────
-        log("\n[2/4]  Entombing the existing sunnypilot install ...")
+        # ── 2. Entomb / backup the old install ───────────────────────────────────
+        if backup:
+            log("\n[2/4]  Backing up the existing install ...")
+        else:
+            log("\n[2/4]  Entombing the existing install ...")
         if dry_run:
-            log(f"{dr}Would rename /data/openpilot  →  /data/sunnypilot_entombed_<timestamp>")
+            dest = "/data/openpilot_backup_<timestamp>" if backup else "/data/sunnypilot_entombed_<timestamp>"
+            log(f"{dr}Would rename /data/openpilot  →  {dest}")
         else:
             r = subprocess.run(ssh_base + ["date +%Y%m%d_%H%M%S"],
                                capture_output=True, text=True)
-            ts = r.stdout.strip() or "entombed"
-            tomb_path = f"/data/sunnypilot_entombed_{ts}"
+            ts = r.stdout.strip() or "moved"
+            dest_path = f"/data/openpilot_backup_{ts}" if backup else f"/data/sunnypilot_entombed_{ts}"
             rename_cmd = (
                 f"if [ -d /data/openpilot ]; then "
-                f"  mv /data/openpilot {tomb_path} && echo ENTOMBED; "
+                f"  mv /data/openpilot {dest_path} && echo MOVED; "
                 f"else echo EMPTY; fi"
             )
             r = subprocess.run(ssh_base + [rename_cmd], capture_output=True, text=True)
-            if "ENTOMBED" in r.stdout:
-                log(f"  /data/openpilot  →  {tomb_path}")
+            if "MOVED" in r.stdout:
+                log(f"  /data/openpilot  →  {dest_path}")
             else:
                 log("  No existing /data/openpilot found — skipping.")
 
@@ -377,7 +382,9 @@ class OPNecromancer(tk.Tk):
         self._repo_url        = tk.StringVar()
         self._branch          = tk.StringVar(value="nap-alpha")
         self._repo_validated: bool = False
+        self._c3_patched:     bool = False
         self._dry_run         = tk.BooleanVar(value=False)
+        self._backup_existing = tk.BooleanVar(value=True)
         self._log_q:          queue.Queue[str] = queue.Queue()
 
         # Reset repo validation if URL or branch changes
@@ -480,6 +487,21 @@ class OPNecromancer(tk.Tk):
             # Enabled only after prereqs pass
             self._btn_next.configure(text="Proceed →", state="disabled")
         elif step == 2:
+            # Update Grimoire page labels + backup option based on patch state
+            if self._c3_patched:
+                self._grimoire_title.configure(text="Swap the Grimoire (Change Fork)")
+                self._grimoire_sub.configure(
+                    text="The C3 patch is already installed. Select a different fork "
+                         "to swap to — it will be validated and the curse reapplied."
+                )
+                self._backup_row.pack(anchor="w", pady=(6, 0), before=self._validate_btn)
+            else:
+                self._grimoire_title.configure(text="Select Your Grimoire (Repository)")
+                self._grimoire_sub.configure(
+                    text=f"The grimoire must contain an openpilot {SUPPORTED_VER} spell "
+                         f"— other versions are not yet supported."
+                )
+                self._backup_row.pack_forget()
             # Enabled only after grimoire validated
             self._btn_next.configure(
                 text="Begin Ritual ▶",
@@ -731,6 +753,7 @@ class OPNecromancer(tk.Tk):
         is_sp       = result.get("is_sunnypilot", False)
         ver_ok      = result.get("version_ok", False)
         c3_patched  = result.get("c3patch_installed", False)
+        self._c3_patched = c3_patched
         self._set_icon("sp",  "ok" if is_sp  else "fail")
         self._set_icon("ver", "ok" if ver_ok else "fail")
 
@@ -757,15 +780,16 @@ class OPNecromancer(tk.Tk):
                 fg=OK)
             self._btn_next.configure(state="normal")
         elif c3_patched:
-            # Already running the patched fork — prereq checks are for fresh installs only
+            # Already running the patched fork — allow proceeding to swap grimoire
             self._prereq_msg.configure(
                 text=(
                     "ℹ  These prereqs are for fresh installs only (expect sunnypilot 0.10.1 as base).\n"
                     "Your C3 is already running the patched fork — use Maintenance above\n"
-                    "to verify the patch service or update to the latest commit."
+                    "to verify the service or update, or proceed to swap to a different fork."
                 ),
                 fg=ACC,
             )
+            self._btn_next.configure(state="normal")
         else:
             issues = []
             if not is_sp:
@@ -816,7 +840,10 @@ class OPNecromancer(tk.Tk):
         update_btn.pack(side="left", padx=(0, 8))
         specific_btn = self._mk_btn(btn_row, "📜  Specific Commit…",
                                     lambda: _do_specific_commit(), bg="#3a2a4e", fg=ACC)
-        specific_btn.pack(side="left")
+        specific_btn.pack(side="left", padx=(0, 8))
+        branch_btn   = self._mk_btn(btn_row, "🌿  Switch Branch…",
+                                    lambda: _do_switch_branch(), bg="#3a2a4e", fg=ACC)
+        branch_btn.pack(side="left")
 
         tk.Frame(win, bg=SEP, height=1).pack(fill="x", padx=20)
 
@@ -866,6 +893,7 @@ class OPNecromancer(tk.Tk):
             win.after(0, lambda: verify_btn.configure(state=state))
             win.after(0, lambda: update_btn.configure(state=state))
             win.after(0, lambda: specific_btn.configure(state=state))
+            win.after(0, lambda: branch_btn.configure(state=state))
 
         # ── Shared: stop service → run cmd → reapply patch ────────────────────
         def _run_checkout_and_patch(step_label: str, remote_cmd: str):
@@ -1121,16 +1149,135 @@ class OPNecromancer(tk.Tk):
             self._mk_btn(nav2, "Restore to Selected  ☠", _confirm, bold=True).pack(side="right", padx=16)
             self._mk_btn(nav2, "Cancel", picker.destroy, bg="#3a2a4e", fg=FG).pack(side="left", padx=16)
 
+        # ── Switch branch ─────────────────────────────────────────────────────
+        def _do_switch_branch():
+            _set_btns("disabled")
+            _append("\n☠  Consulting the ancient branches — fetching available incantations...\n")
+
+            def _worker():
+                cmd = (
+                    "cd /data/openpilot && "
+                    "git fetch origin --quiet 2>/dev/null; "
+                    "printf 'CURRENT=%s\\n' $(git rev-parse --abbrev-ref HEAD 2>/dev/null); "
+                    "git branch -r --format='%(refname:short)' 2>/dev/null "
+                    "| sed 's|origin/||' | grep -v '^HEAD'"
+                )
+                try:
+                    r = subprocess.run(
+                        ["ssh"] + _ssh_opts(key) + [f"{DEFAULT_USER}@{host}", cmd],
+                        capture_output=True, text=True, timeout=30,
+                    )
+                    current = ""
+                    branches: list[str] = []
+                    for line in r.stdout.splitlines():
+                        if line.startswith("CURRENT="):
+                            current = line[8:].strip()
+                        elif line.strip():
+                            branches.append(line.strip())
+                    _append(f"  Current branch : {current}\n")
+                    _append(f"  Found {len(branches)} branch(es) available.\n")
+                    win.after(0, lambda: _open_branch_picker(branches, current))
+                except Exception as e:
+                    _append(f"\n✗  Failed to fetch branches: {e}\n")
+                    _set_btns("normal")
+
+            threading.Thread(target=_worker, daemon=True).start()
+
+        def _open_branch_picker(branches: list[str], current: str):
+            _set_btns("normal")
+
+            picker = tk.Toplevel(win)
+            picker.title("☠  Switch Branch")
+            picker.configure(bg=BG)
+            picker.geometry("600x360")
+            picker.resizable(False, False)
+            picker.grab_set()
+
+            hdr2 = tk.Frame(picker, bg=HDR, pady=8)
+            hdr2.pack(fill="x")
+            tk.Label(hdr2, text="☠  Switch Branch",
+                     bg=HDR, fg=ACC, font=("TkDefaultFont", 12, "bold")).pack()
+            tk.Label(hdr2,
+                     text="Select a branch — it will be checked out and the C3 curse reapplied.",
+                     bg=HDR, fg=MUTED, font=("TkDefaultFont", 9, "italic")).pack()
+
+            lf = tk.Frame(picker, bg=BG)
+            lf.pack(fill="both", expand=True, padx=16, pady=10)
+            sb = tk.Scrollbar(lf)
+            sb.pack(side="right", fill="y")
+            lb = tk.Listbox(
+                lf, bg=CARD, fg=FG, font=("TkFixedFont", 10),
+                selectbackground=ACC, selectforeground="#0e0818",
+                relief="flat", yscrollcommand=sb.set, activestyle="none",
+            )
+            lb.pack(side="left", fill="both", expand=True)
+            sb.configure(command=lb.yview)
+
+            curr_idx = None
+            for i, b in enumerate(branches):
+                if b == current:
+                    lb.insert("end", f"  ► {b}   ← current")
+                    curr_idx = i
+                else:
+                    lb.insert("end", f"  {b}")
+            if curr_idx is not None:
+                lb.itemconfigure(curr_idx, fg=OK)
+                lb.see(curr_idx)
+
+            nav2 = tk.Frame(picker, bg=HDR, pady=8)
+            nav2.pack(fill="x", side="bottom")
+
+            def _confirm_branch():
+                sel = lb.curselection()
+                if not sel:
+                    messagebox.showwarning("Nothing selected",
+                                           "Select a branch from the list first.", parent=picker)
+                    return
+                chosen = branches[sel[0]]
+                if chosen == current:
+                    messagebox.showinfo("Already there",
+                                        f"Already on branch '{current}' — nothing to do.",
+                                        parent=picker)
+                    return
+                if not messagebox.askyesno(
+                    "Confirm Branch Switch ☠",
+                    f"Switch to branch:\n\n  {chosen}\n\n"
+                    "The C3 curse will be reapplied afterwards.\n\nProceed?",
+                    parent=picker,
+                ):
+                    return
+                picker.destroy()
+                _set_btns("disabled")
+                _append(f"\n☠  Switching to branch {chosen}...\n\n")
+                threading.Thread(
+                    target=_run_checkout_and_patch,
+                    args=(
+                        f"Switching to branch {chosen}",
+                        f"cd /data/openpilot && "
+                        f"git fetch origin --quiet 2>/dev/null; "
+                        f"git submodule foreach --recursive git reset --hard 2>/dev/null; "
+                        f"git submodule foreach --recursive git clean -fd 2>/dev/null; "
+                        f"git checkout {chosen} 2>&1 && "
+                        f"git pull --rebase --recurse-submodules --progress 2>&1",
+                    ),
+                    daemon=True,
+                ).start()
+
+            self._mk_btn(nav2, "Switch to Selected  ☠", _confirm_branch, bold=True).pack(side="right", padx=16)
+            self._mk_btn(nav2, "Cancel", picker.destroy, bg="#3a2a4e", fg=FG).pack(side="left", padx=16)
+
     # ── Page III: Grimoire ────────────────────────────────────────────────────
 
     def _page_grimoire(self, parent) -> tk.Frame:
         f = tk.Frame(parent, bg=BG)
 
-        tk.Label(f, text="Select Your Grimoire (Repository)",
-                 bg=BG, fg=FG, font=("TkDefaultFont", 14, "bold")).pack(anchor="w", pady=(0, 4))
-        tk.Label(f,
+        self._grimoire_title = tk.Label(f, text="Select Your Grimoire (Repository)",
+                 bg=BG, fg=FG, font=("TkDefaultFont", 14, "bold"))
+        self._grimoire_title.pack(anchor="w", pady=(0, 4))
+        self._grimoire_sub = tk.Label(f,
                  text=f"The grimoire must contain an openpilot {SUPPORTED_VER} spell — other versions are not yet supported.",
-                 bg=BG, fg=MUTED, font=("TkDefaultFont", 9, "italic")).pack(anchor="w", pady=(0, 14))
+                 bg=BG, fg=MUTED, font=("TkDefaultFont", 9, "italic"))
+        self._grimoire_sub.pack(anchor="w", pady=(0, 14))
 
         # Repo URL
         r1 = tk.Frame(f, bg=BG)
@@ -1150,8 +1297,21 @@ class OPNecromancer(tk.Tk):
                  insertbackground=FG, relief="flat",
                  font=("TkFixedFont", 10), width=26).pack(side="left", padx=4)
 
-        self._mk_btn(f, "Inspect Grimoire ☠", self._do_validate,
-                     bg="#3a2a4e", fg=ACC).pack(anchor="w", pady=10)
+        # Backup row — only shown when swapping from a patched install
+        self._backup_row = tk.Frame(f, bg=BG)
+        tk.Checkbutton(
+            self._backup_row,
+            text="☠  Backup existing /data/openpilot before swapping  (saved as /data/openpilot_backup_<timestamp>)",
+            variable=self._backup_existing,
+            bg=BG, fg=MUTED, selectcolor=CARD,
+            activebackground=BG, activeforeground=ACC,
+            font=("TkDefaultFont", 9),
+        ).pack(anchor="w")
+        # not packed until c3_patched confirmed — _show_step handles this
+
+        self._validate_btn = self._mk_btn(f, "Inspect Grimoire ☠", self._do_validate,
+                     bg="#3a2a4e", fg=ACC)
+        self._validate_btn.pack(anchor="w", pady=10)
 
         self._repo_status = tk.Label(f, text="", bg=BG, fg=FG,
                                      font=("TkDefaultFont", 10),
@@ -1277,7 +1437,8 @@ class OPNecromancer(tk.Tk):
         def done_cb(ok: bool, msg: str):
             self.after(0, lambda: self._on_install_done(ok, msg))
 
-        run_install(host, DEFAULT_USER, key, url, branch, log_cb, done_cb, dry_run=dry)
+        run_install(host, DEFAULT_USER, key, url, branch, log_cb, done_cb,
+                    dry_run=dry, backup=self._backup_existing.get())
 
     def _on_install_done(self, ok: bool, msg: str):
         dry = self._dry_run.get()
