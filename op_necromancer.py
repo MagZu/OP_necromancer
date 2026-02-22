@@ -26,6 +26,7 @@ import urllib.request
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from tkinter import filedialog, messagebox, scrolledtext
+from tkinter import ttk
 import tkinter as tk
 
 # ── Paths ─────────────────────────────────────────────────────────────────────
@@ -192,10 +193,13 @@ def validate_repo(url: str, branch: str) -> tuple[bool, str]:
             req = urllib.request.Request(raw, headers={"User-Agent": "op-necromancer/1.0"})
             with urllib.request.urlopen(req, timeout=12) as resp:
                 content = resp.read().decode("utf-8", errors="replace")
-            if SUPPORTED_VER in content:
+            # Release files are newest-first changelogs — take the first version found
+            # (simple substring check would give false positives for historical entries)
+            versions = re.findall(r"\b0\.\d+\.\d+\b", content)
+            primary = versions[0] if versions else None
+            if primary == SUPPORTED_VER:
                 return True, f"✓  The grimoire speaks of version {SUPPORTED_VER} — spell is compatible."
-            versions = re.findall(r"0\.\d+\.\d+", content)
-            ver_str = versions[0] if versions else "unknown"
+            ver_str = primary or "unknown"
             return False, (
                 f"This grimoire contains a version {ver_str} spell — incompatible.\n"
                 f"OP Necromancer currently only supports openpilot {SUPPORTED_VER}."
@@ -208,6 +212,23 @@ def validate_repo(url: str, branch: str) -> tuple[bool, str]:
             return False, f"Could not consult the archives: {e}"
 
     return False, f"No release.md found in {owner}/{repo} at branch '{branch}'"
+
+
+def fetch_branches(url: str) -> list[str]:
+    """Query the GitHub API for branch names for the given repo URL."""
+    url = url.strip()
+    m = re.match(r"https?://github\.com/([^/]+)/([^/\s]+?)(?:\.git)?/?$", url)
+    if not m:
+        return []
+    owner, repo = m.group(1), m.group(2)
+    api = f"https://api.github.com/repos/{owner}/{repo}/branches?per_page=100"
+    try:
+        req = urllib.request.Request(api, headers={"User-Agent": "op-necromancer/1.0"})
+        with urllib.request.urlopen(req, timeout=12) as resp:
+            data = json.loads(resp.read().decode())
+        return [b["name"] for b in data]
+    except Exception:
+        return []
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -1268,6 +1289,37 @@ class OPNecromancer(tk.Tk):
 
     # ── Page III: Grimoire ────────────────────────────────────────────────────
 
+    def _do_fetch_branches(self):
+        url = self._repo_url.get().strip()
+        if not url:
+            self._repo_status.configure(
+                text="Enter a GitHub URL first, then fetch its branches.", fg=ERR)
+            return
+        self._fetch_branch_btn.configure(state="disabled", text="Seeking…")
+        self._repo_status.configure(text="Summoning branch list from the archives…", fg=MUTED)
+        self.update_idletasks()
+
+        def _worker():
+            branches = fetch_branches(url)
+            self.after(0, lambda: self._on_branches(branches))
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _on_branches(self, branches: list[str]):
+        self._fetch_branch_btn.configure(state="normal", text="Fetch Branches ☠")
+        if branches:
+            self._branch_cb["values"] = branches
+            # Auto-select if current value is in the list, otherwise pick first
+            cur = self._branch.get()
+            if cur not in branches:
+                self._branch.set(branches[0])
+            self._repo_status.configure(
+                text=f"✓  {len(branches)} branch{'es' if len(branches) != 1 else ''} found — select one then inspect the grimoire.",
+                fg=OK)
+        else:
+            self._repo_status.configure(
+                text="Could not fetch branches — check the URL or your internet connection.", fg=ERR)
+
     def _page_grimoire(self, parent) -> tk.Frame:
         f = tk.Frame(parent, bg=BG)
 
@@ -1293,9 +1345,12 @@ class OPNecromancer(tk.Tk):
         r2.pack(fill="x", pady=5)
         tk.Label(r2, text="Branch / Incantation:", bg=BG, fg=FG,
                  width=18, anchor="w").pack(side="left")
-        tk.Entry(r2, textvariable=self._branch, bg=CARD, fg=FG,
-                 insertbackground=FG, relief="flat",
-                 font=("TkFixedFont", 10), width=26).pack(side="left", padx=4)
+        self._branch_cb = ttk.Combobox(r2, textvariable=self._branch,
+                                       font=("TkFixedFont", 10), width=24, state="normal")
+        self._branch_cb.pack(side="left", padx=4)
+        self._fetch_branch_btn = self._mk_btn(r2, "Fetch Branches ☠", self._do_fetch_branches,
+                                              bg="#3a2a4e", fg=ACC)
+        self._fetch_branch_btn.pack(side="left", padx=4)
 
         # Backup row — only shown when swapping from a patched install
         self._backup_row = tk.Frame(f, bg=BG)
