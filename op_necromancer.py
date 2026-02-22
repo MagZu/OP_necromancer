@@ -868,7 +868,10 @@ class OPNecromancer(tk.Tk):
         specific_btn.pack(side="left", padx=(0, 8))
         branch_btn   = self._mk_btn(btn_row, "🌿  Switch Branch…",
                                     lambda: _do_switch_branch(), bg="#3a2a4e", fg=ACC)
-        branch_btn.pack(side="left")
+        branch_btn.pack(side="left", padx=(0, 8))
+        rollback_btn = self._mk_btn(btn_row, "↩  Rollback…",
+                                    lambda: _do_rollback(), bg="#3a2a4e", fg=WARN)
+        rollback_btn.pack(side="left")
 
         tk.Frame(win, bg=SEP, height=1).pack(fill="x", padx=20)
 
@@ -919,6 +922,7 @@ class OPNecromancer(tk.Tk):
             win.after(0, lambda: update_btn.configure(state=state))
             win.after(0, lambda: specific_btn.configure(state=state))
             win.after(0, lambda: branch_btn.configure(state=state))
+            win.after(0, lambda: rollback_btn.configure(state=state))
 
         # ── Shared: stop service → run cmd → reapply patch ────────────────────
         def _run_checkout_and_patch(step_label: str, remote_cmd: str):
@@ -1014,6 +1018,126 @@ class OPNecromancer(tk.Tk):
                     _set_btns("normal")
 
             threading.Thread(target=_worker, daemon=True).start()
+
+        # ── Rollback ──────────────────────────────────────────────────────────
+        def _do_rollback():
+            _set_btns("disabled")
+            _append("☠  Searching for backup tombs...\n\n")
+
+            def _fetch_backups():
+                try:
+                    r = subprocess.run(
+                        ["ssh"] + _ssh_opts(key) + [f"{DEFAULT_USER}@{host}",
+                         "ls -1d /data/openpilot_backup_* 2>/dev/null | sort -r"],
+                        capture_output=True, text=True, timeout=15,
+                    )
+                    backups = [b.strip() for b in r.stdout.splitlines() if b.strip()]
+                except Exception as e:
+                    win.after(0, lambda: (_append(f"✗  Could not list backups: {e}\n"), _set_btns("normal")))
+                    return
+
+                if not backups:
+                    win.after(0, lambda: (
+                        _append("✗  No backup tombs found at /data/openpilot_backup_*\n"),
+                        messagebox.showinfo("No Backups", "No backup directories found on the C3.\n\n"
+                                            "Backups are created when you use \"Swap fork\" in the Grimoire.", parent=win),
+                        _set_btns("normal"),
+                    ))
+                    return
+
+                win.after(0, lambda: _show_rollback_picker(backups))
+
+            def _show_rollback_picker(backups: list[str]):
+                picker = tk.Toplevel(win)
+                picker.title("☠  Rollback")
+                picker.configure(bg=BG)
+                picker.geometry("540x360")
+                picker.resizable(False, False)
+                picker.grab_set()
+
+                hdr2 = tk.Frame(picker, bg=HDR, pady=8)
+                hdr2.pack(fill="x")
+                tk.Label(hdr2, text="☠  Rollback to Backup",
+                         bg=HDR, fg=ACC, font=("TkDefaultFont", 12, "bold")).pack()
+                tk.Label(hdr2, text="Select a backup to restore as /data/openpilot",
+                         bg=HDR, fg=MUTED, font=("TkDefaultFont", 9)).pack()
+
+                lb_frame = tk.Frame(picker, bg=BG)
+                lb_frame.pack(fill="both", expand=True, padx=20, pady=12)
+                lb = tk.Listbox(lb_frame, bg=HDR, fg=FG, selectbackground=ACC,
+                                selectforeground=BG, font=("TkFixedFont", 10),
+                                relief="flat", activestyle="none", height=8)
+                lb.pack(fill="both", expand=True)
+                for b in backups:
+                    lb.insert("end", b)
+                lb.selection_set(0)
+
+                nav2 = tk.Frame(picker, bg=BG, pady=10)
+                nav2.pack(fill="x", padx=20)
+
+                def _confirm_rollback():
+                    sel = lb.curselection()
+                    if not sel:
+                        return
+                    chosen = backups[sel[0]]
+                    picker.destroy()
+                    confirmed = messagebox.askyesno(
+                        "Confirm Rollback ☠",
+                        f"Restore backup:\n\n  {chosen}\n\n"
+                        "Current /data/openpilot will be renamed to /data/openpilot_pre_rollback.\n\n"
+                        "Proceed?",
+                        parent=win,
+                    )
+                    if not confirmed:
+                        _set_btns("normal")
+                        return
+
+                    _append(f"\n☠  Rolling back to {chosen}...\n\n")
+
+                    def _worker():
+                        ssh_base = ["ssh"] + _ssh_opts(key) + [f"{DEFAULT_USER}@{host}"]
+                        _append("[1/3]  Stopping openpilot...\n")
+                        subprocess.run(ssh_base + ["sudo systemctl stop comma.service 2>/dev/null || true"],
+                                       capture_output=True)
+                        _append("[2/3]  Swapping directories...\n")
+                        cmd = (
+                            "mv /data/openpilot /data/openpilot_pre_rollback 2>/dev/null || true && "
+                            f"mv {chosen} /data/openpilot"
+                        )
+                        r = subprocess.run(ssh_base + [cmd], capture_output=True, text=True)
+                        if r.returncode != 0:
+                            _append(f"\n✗  Directory swap failed:\n{r.stderr}\n")
+                            _set_btns("normal")
+                            return
+                        _append("[3/3]  Reapplying C3 curse on restored backup...\n")
+                        patch_proc = subprocess.Popen(
+                            [sys.executable, str(C3_PATCH), "--host", host, "--key", key],
+                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                            text=True, bufsize=1, cwd=str(C3_PATCH.parent),
+                        )
+                        assert patch_proc.stdout is not None
+                        for line in patch_proc.stdout:
+                            _append(line.rstrip() + "\n")
+                        patch_proc.wait()
+                        if patch_proc.returncode == 0:
+                            _append("\n" + "☠" * 20 + "\n")
+                            _append("  ✓  Rollback complete — reboot the C3 to activate.\n")
+                            _append("☠" * 20 + "\n")
+                            win.after(0, lambda: messagebox.showinfo(
+                                "Rollback Complete ☠",
+                                "Rollback complete.\n\nReboot the C3 to activate.", parent=win,
+                            ))
+                        else:
+                            _append("\n✗  Patch reapplication failed — check the log.\n")
+                        _set_btns("normal")
+
+                    threading.Thread(target=_worker, daemon=True).start()
+
+                self._mk_btn(nav2, "Cancel", picker.destroy).pack(side="left")
+                self._mk_btn(nav2, "Rollback to Selected  ☠", _confirm_rollback,
+                             bold=True, bg="#4e1a1a", fg=WARN).pack(side="right", padx=16)
+
+            threading.Thread(target=_fetch_backups, daemon=True).start()
 
         # ── Update to latest ──────────────────────────────────────────────────
         def _do_update():

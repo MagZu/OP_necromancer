@@ -1207,6 +1207,69 @@ else:
 
     print("  ✓  Necromancer C3 panel installed.")
 
+    # Patch home.py to show purple ward indicator when C3 wards are intact
+    home_py = f"{op}/selfdrive/ui/layouts/home.py"
+    home_patch = f"""
+import os as _os
+p = _os.path
+path = {repr(home_py)}
+t = open(path).read()
+changed = False
+
+if 'import os' not in t:
+    t = t.replace('import time\\n', 'import os\\nimport time\\n')
+    changed = True
+
+OLD_INIT = '    self.header_rect = rl.Rectangle(0, 0, 0, 0)'
+NEW_INIT = '    self._c3_wards_ok: bool = False\\n    self.header_rect = rl.Rectangle(0, 0, 0, 0)'
+if '_c3_wards_ok' not in t:
+    t = t.replace(OLD_INIT, NEW_INIT)
+    changed = True
+
+OLD_REFRESH = '    self.update_available = update_available\\n    self.alert_count = alert_count'
+NEW_REFRESH = (
+    '    self.update_available = update_available\\n'
+    '    self.alert_count = alert_count\\n'
+    '    # C3 ward check — quick file-only test\\n'
+    '    self._c3_wards_ok = (\\n'
+    '      os.path.isdir("/data/c3_backup") and\\n'
+    '      os.path.isfile("/data/c3_backup/panda/panda.bin.signed") and\\n'
+    '      os.path.isfile("/data/no_agnos_update")\\n'
+    '    )'
+)
+if 'c3_backup' not in t and OLD_REFRESH in t:
+    t = t.replace(OLD_REFRESH, NEW_REFRESH)
+    changed = True
+
+OLD_RENDER = '  def _render_header(self):\\n    font = gui_app.font(FontWeight.MEDIUM)'
+NEW_RENDER = (
+    '  def _render_header(self):\\n'
+    '    # C3 patch indicator — purple strip at the very top\\n'
+    '    if self._c3_wards_ok:\\n'
+    '      rl.draw_rectangle_rec(\\n'
+    '        rl.Rectangle(self._rect.x, self._rect.y, self._rect.width, 5),\\n'
+    '        rl.Color(192, 132, 252, 255),\\n'
+    '      )\\n'
+    '    font = gui_app.font(FontWeight.MEDIUM)'
+)
+if 'C3 patch indicator' not in t and OLD_RENDER in t:
+    t = t.replace(OLD_RENDER, NEW_RENDER)
+    changed = True
+
+if changed:
+    open(path, 'w').write(t)
+    print('PATCHED')
+else:
+    print('ALREADY_PATCHED')
+"""
+    result = device_python(host, user, home_patch)
+    if "PATCHED" in result:
+        print("  home.py patched — purple ward indicator added to offroad header.")
+    elif "ALREADY_PATCHED" in result:
+        print("  home.py already has purple ward indicator.")
+    else:
+        print(f"  WARNING: home.py patch result unclear: {result!r}")
+
 
 if __name__ == "__main__":
     main()
